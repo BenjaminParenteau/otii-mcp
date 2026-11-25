@@ -60,6 +60,7 @@ class FakeAce:
         self.drop_every = 0  # when > 0, skip every Nth sample frame (counter still advances)
         self.enabled_channels: list[int] = []
         self.streaming = False
+        self._stream_started = 0.0
         self._frame_counter = 0
         self._parser = FrameParser()
         self._outbox: queue.SimpleQueue[bytes] = queue.SimpleQueue()
@@ -116,8 +117,10 @@ class FakeAce:
             self._reply(seq, 0, b"")
         elif command == CMD_STREAM_START:
             self.streaming, self._frame_counter = True, 0
+            self._stream_started = time.monotonic()
             self._reply(seq, 0, b"")
         elif command == CMD_STREAM_STOP:
+            self._emit_due_frames()
             self.streaming = False
             self._reply(seq, 0, b"")
         elif command == CMD_GET:
@@ -165,36 +168,36 @@ class FakeAce:
             self._outbox.put(encode_frame(STREAM_TAG + b"\0\0\0\0" + records))
 
     def _sample_loop(self) -> None:
-        # Real Ace: 1000 frames/s, each followed by an empty status frame.
-        # Emitted in batches paced by elapsed time (sleep granularity on
-        # Windows is ~15 ms), so the rate holds at 1000/s.
-        started: float | None = None
+        # Real Ace: 1000 frames/s from the start command, each followed by an
+        # empty status frame. Sleep granularity on Windows is ~15 ms, so frames
+        # are emitted in batches paced by the clock started at the start
+        # command; the stop command flushes whatever is still due.
         while not self._stop.wait(0.005):
             with self._lock:
-                if not self.streaming:
-                    started = None
-                    continue
-                now = time.monotonic()
-                if started is None:
-                    started = now
-                due = int((now - started) * 1000) - self._frame_counter
-                volts, amps = self.output()
-                values = {0: amps, 1: volts, 6: amps * volts}
-                chunk = b""
-                for _ in range(max(0, due)):
-                    counter = self._frame_counter
-                    self._frame_counter += 1
-                    if self.drop_every and counter % self.drop_every == self.drop_every - 1:
-                        continue
-                    body = b"".join(
-                        struct.pack("<HHI", channel, SAMPLES_PER_BLOCK, SAMPLE_RATE)
-                        + struct.pack(f"<{SAMPLES_PER_BLOCK}f", *([values.get(channel, 0.0)] * SAMPLES_PER_BLOCK))
-                        for channel in self.enabled_channels
-                    )
-                    chunk += encode_frame(SAMPLES_TAG + struct.pack("<I", counter) + body)
-                    chunk += encode_frame(STREAM_TAG + b"\0\0\0\0")
-            if chunk:
-                self._outbox.put(chunk)
+                self._emit_due_frames()
+
+    def _emit_due_frames(self) -> None:
+        """Queue the sample frames due since the stream started. Caller holds the lock."""
+        if not self.streaming:
+            return
+        due = int((time.monotonic() - self._stream_started) * 1000) - self._frame_counter
+        volts, amps = self.output()
+        values = {0: amps, 1: volts, 6: amps * volts}
+        chunk = b""
+        for _ in range(max(0, due)):
+            counter = self._frame_counter
+            self._frame_counter += 1
+            if self.drop_every and counter % self.drop_every == self.drop_every - 1:
+                continue
+            body = b"".join(
+                struct.pack("<HHI", channel, SAMPLES_PER_BLOCK, SAMPLE_RATE)
+                + struct.pack(f"<{SAMPLES_PER_BLOCK}f", *([values.get(channel, 0.0)] * SAMPLES_PER_BLOCK))
+                for channel in self.enabled_channels
+            )
+            chunk += encode_frame(SAMPLES_TAG + struct.pack("<I", counter) + body)
+            chunk += encode_frame(STREAM_TAG + b"\0\0\0\0")
+        if chunk:
+            self._outbox.put(chunk)
 
 
 class FakeAceTransport:
