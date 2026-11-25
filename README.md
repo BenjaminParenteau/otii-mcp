@@ -59,35 +59,109 @@ running.
 | --- | --- | --- |
 | `OTII_SERIAL_PORT` | auto | COM port of the Ace. By default the Ace is found by its USB id (`0FCE:D1E6`) |
 
-## Install and register
+## Install
 
 Needs Python 3.11+ and the Ace on USB.
 
-**To just use it**, install straight from GitHub with pipx:
+**To just use it**, install straight from GitHub with pipx. This puts an
+`otii-mcp` command on your PATH (open a new terminal after `ensurepath`):
 
 ```powershell
 py -m pip install --user pipx
 py -m pipx ensurepath
 py -m pipx install git+https://github.com/BenjaminParenteau/otii-mcp.git
-claude mcp add --scope user otii '--' otii-mcp
 ```
 
-To update later, run `py -m pipx upgrade otii-mcp`, then restart the `otii`
-server in Claude Code (`/mcp`).
+To update later, run `py -m pipx upgrade otii-mcp`, then restart the server in
+your MCP client.
 
-**To work on it**, clone the repo and install it editable:
+**To work on it**, clone the repo and install it editable. In the client setup
+below, use `<repo>\.venv\Scripts\python.exe` with the arguments
+`-m otii_mcp.server` in place of `otii-mcp`:
 
 ```powershell
 git clone https://github.com/BenjaminParenteau/otii-mcp.git
 cd otii-mcp
 py -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
-claude mcp add --scope user otii '--' "$PWD\.venv\Scripts\python.exe" -m otii_mcp.server
 ```
 
 Only tested on Windows. pyserial and the USB-id lookup should also work on
 Linux and macOS (on Linux the user needs serial-port access, e.g. the
 `dialout` group).
+
+## Connect to Claude Code
+
+```powershell
+claude mcp add --scope user otii '--' otii-mcp
+```
+
+Restart the server from `/mcp` after an update.
+
+## Connect to GitHub Copilot
+
+These steps follow GitHub's and VS Code's documentation as of November 2026.
+They haven't been tested with this server yet; the Claude Code setup has.
+
+**Copilot Business or Enterprise:** an organization admin must enable the
+"MCP servers in Copilot" policy first. It's off by default. Free, Pro and Pro+
+plans aren't affected.
+
+**VS Code (Copilot Chat) and Copilot CLI** share one user-level file,
+`~/.copilot/mcp-config.json` (on Windows,
+`C:\Users\<you>\.copilot\mcp-config.json`). Create it, or add `otii` to the
+existing `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "otii": {
+      "type": "stdio",
+      "command": "otii-mcp",
+      "args": [],
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+To pin the Ace to a port instead of auto-detecting it, add
+`"env": { "OTII_SERIAL_PORT": "COM10" }`.
+
+Instead of editing the file, you can use the guided flows:
+
+- **VS Code:** run **MCP: Add Server** from the Command Palette, choose
+  **Command (stdio)**, enter `otii-mcp`, use `otii` as the server ID, and save it
+  to **Global** (Copilot Global). Then open Copilot Chat, switch to **Agent**
+  mode, approve the server's startup when asked, and check that the `otii_*`
+  tools are ticked in the tools picker.
+- **Copilot CLI:** run `copilot mcp add otii -- otii-mcp` in a terminal, or
+  `/mcp add` inside a session (Server Type **STDIO**, Command `otii-mcp`, then
+  **Ctrl+S**). `copilot mcp list` shows it.
+
+**Visual Studio 2022 (17.14+) and JetBrains IDEs** still use their own
+`mcp.json` with a `servers` key. Open it from Copilot Chat in Agent mode via the
+tools icon (Visual Studio: **+** > Configure MCP server; JetBrains: **Add MCP
+Tools**), and add:
+
+```json
+{
+  "servers": {
+    "otii": {
+      "type": "stdio",
+      "command": "otii-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+VS Code also still reads the older `.vscode/mcp.json` in this `servers` format,
+but it's deprecated in favour of the `mcpServers` file above.
+
+Only one program can use the Ace at a time. If both Claude Code and Copilot
+have the server configured, the first one to call a tool holds the port until
+its server restarts.
 
 ## Checks
 

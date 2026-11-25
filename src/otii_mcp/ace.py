@@ -523,7 +523,10 @@ def open_transport(port: str) -> Transport:
         link.open()
     except serial.SerialException as error:
         if "denied" in str(error).lower() or "busy" in str(error).lower():
-            raise AceError(f"{port} is busy. Close the Otii desktop app (only one program can use the Ace).") from error
+            raise AceError(
+                f"{port} is busy: only one program can use the Ace. Close the Otii desktop app, or any "
+                "other MCP client (e.g. Claude Code or Copilot) running this server."
+            ) from error
         raise AceError(f"Cannot open {port}: {error}") from error
     # Full-rate streaming is ~640 KB/s; a large driver buffer rides out
     # scheduling hiccups in the reader thread (Windows only).
