@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
@@ -45,7 +46,18 @@ def test_tools_over_stdio(ace_server):
 
     names, on, read, measured, off, bad = asyncio.run(scenario())
 
-    assert names == ["otii_measure", "otii_power_off", "otii_power_on", "otii_read"]
+    assert names == [
+        "otii_analyze",
+        "otii_measure",
+        "otii_plot",
+        "otii_power_off",
+        "otii_power_on",
+        "otii_read",
+        "otii_record_start",
+        "otii_record_status",
+        "otii_record_stop",
+        "otii_save",
+    ]
     assert not on.is_error and on.structured_content["output_on"] is True
     assert read.structured_content["current_a"] == pytest.approx(0.033)
     assert measured.structured_content["power_w"]["avg"] == pytest.approx(3.3 * 3.3 / 100)
@@ -64,3 +76,30 @@ def test_missing_ace_is_a_tool_error_not_a_crash():
 
     assert result.is_error
     assert "Cannot open COM250" in result.content[0].text
+
+
+def test_background_recording_plot_and_save_over_stdio(ace_server, tmp_path):
+    async def scenario():
+        async with Client(_params(ace_server.url)) as client:
+            await client.call_tool("otii_power_on", {"voltage_v": 3.3})
+            started = await client.call_tool("otii_record_start", {"max_seconds": 30})
+            await asyncio.sleep(0.6)
+            status = await client.call_tool("otii_record_status", {})
+            stopped = await client.call_tool("otii_record_stop", {})
+            plotted = await client.call_tool("otii_plot", {})
+            saved = await client.call_tool("otii_save", {"directory": str(tmp_path)})
+            await client.call_tool("otii_power_off", {})
+            return started, status, stopped, plotted, saved
+
+    started, status, stopped, plotted, saved = asyncio.run(scenario())
+
+    assert started.structured_content["recording"] is True
+    assert status.structured_content["recording"] is True
+    assert stopped.structured_content["power_w"]["avg"] == pytest.approx(3.3 * 3.3 / 100)
+    assert "bursts" in stopped.structured_content and "intervals" in stopped.structured_content
+    kinds = [block.type for block in plotted.content]
+    assert kinds == ["text", "image"]
+    image = plotted.content[1]
+    assert image.mime_type == "image/png"
+    assert base64.b64decode(image.data)[:8] == b"\x89PNG\r\n\x1a\n"
+    assert Path(saved.structured_content["csv"]).exists()

@@ -9,6 +9,7 @@ the limit and the voltage sags.
 from __future__ import annotations
 
 import queue
+from collections.abc import Callable, Sequence
 import socket
 import struct
 import threading
@@ -50,7 +51,16 @@ def _f32(bits: int) -> float:
 
 
 class FakeAce:
-    def __init__(self, *, load_ohm: float = 100.0, telemetry_hz: float = 25.0) -> None:
+    def __init__(
+        self,
+        *,
+        load_ohm: float = 100.0,
+        telemetry_hz: float = 25.0,
+        profile: Callable[[float], float | Sequence[float]] | None = None,
+    ) -> None:
+        # With the output on, `profile(t)` gives the current for the frame at t
+        # seconds into the stream: one value, or 50 per-sample values.
+        self.profile = profile
         self.output_on = False
         self.voltage_uv = 3_300_000
         self.current_limit_a = 0.5
@@ -182,16 +192,20 @@ class FakeAce:
             return
         due = int((time.monotonic() - self._stream_started) * 1000) - self._frame_counter
         volts, amps = self.output()
-        values = {0: amps, 1: volts, 6: amps * volts}
         chunk = b""
         for _ in range(max(0, due)):
             counter = self._frame_counter
             self._frame_counter += 1
             if self.drop_every and counter % self.drop_every == self.drop_every - 1:
                 continue
+            current = [amps] * SAMPLES_PER_BLOCK
+            if self.profile is not None and self.output_on:
+                shaped = self.profile(counter / 1000)
+                current = list(shaped) if isinstance(shaped, (list, tuple)) else [shaped] * SAMPLES_PER_BLOCK
+            samples = {0: current, 1: [volts] * SAMPLES_PER_BLOCK, 6: [volts * i for i in current]}
             body = b"".join(
                 struct.pack("<HHI", channel, SAMPLES_PER_BLOCK, SAMPLE_RATE)
-                + struct.pack(f"<{SAMPLES_PER_BLOCK}f", *([values.get(channel, 0.0)] * SAMPLES_PER_BLOCK))
+                + struct.pack(f"<{SAMPLES_PER_BLOCK}f", *samples.get(channel, [0.0] * SAMPLES_PER_BLOCK))
                 for channel in self.enabled_channels
             )
             chunk += encode_frame(SAMPLES_TAG + struct.pack("<I", counter) + body)

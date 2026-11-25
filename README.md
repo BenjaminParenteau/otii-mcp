@@ -1,9 +1,10 @@
 # otii-mcp
 
 An unofficial MCP server for the Otii Ace power analyzer. It switches the main
-output on and off, sets the current limit, and measures power at 50 kHz. It
-talks to the Ace directly over USB, so it works without the Otii software
-running.
+output on and off, sets the current limit, measures and records power at
+50 kHz, finds activity bursts, and plots the waveform as an image the AI can
+see. It talks to the Ace directly over USB, so it works without the Otii
+software running.
 
 > **Unofficial.** This project is not affiliated with, endorsed by or supported
 > by Qoitech AB. "Otii" and "Qoitech" are trademarks of Qoitech AB and are used
@@ -21,7 +22,32 @@ running.
 | `otii_power_on(voltage_v?, current_limit_a?)` | Optionally sets the current limit (1 mA-5 A) and voltage (0-25 V), then turns the output on |
 | `otii_power_off()` | Turns the output off |
 | `otii_read()` | Latest 25 Hz reading: on/off, setpoint, current limit and whether it is limiting, current, voltage, power |
-| `otii_measure(seconds=5)` | Records 50 kHz samples for N seconds (max 300): avg/min/max current, voltage, power, energy (J), charge (C), and coverage |
+| `otii_measure(seconds=5, ...)` | Records 50 kHz samples for N seconds (max 300) and returns a report (below) |
+| `otii_record_start(max_seconds=600)` | Starts a background recording and returns at once; other tools keep working. Stops itself at `max_seconds` (max 3600) |
+| `otii_record_status()` | Elapsed time and averages so far |
+| `otii_record_stop(...)` | Stops the recording and returns a report |
+| `otii_analyze(start_s?, end_s?, ...)` | Re-analyzes the last capture, or a time window of it |
+| `otii_plot(start_s?, end_s?, log_scale?)` | Returns a PNG of the last capture or a window: current band (min-max) and average, burst threshold and bursts, voltage below |
+| `otii_save(directory?, start_s?, end_s?)` | Writes CSV (1 ms rows), PNG and JSON summary. Default folder: `OTII_CAPTURE_DIR` or `~/otii-captures` |
+
+A **report** has exact statistics over every 50 kHz sample (average, minimum and
+maximum current, voltage and power, plus energy, charge and coverage), an
+`intervals` breakdown (about 10 by default, or every `interval_s`), and
+`bursts`:
+
+- the sleep/idle baseline current between bursts
+- burst count and rate
+- duration (1 ms resolution)
+- peak current, charge and energy, and the share of energy spent in bursts
+- the first 20 bursts listed individually
+
+The burst threshold is automatic unless you pass `burst_threshold_a`: the
+median current plus the largest of 50 µA, 8× its noise and 5% of it. Bursts
+less than 2 ms apart are merged.
+
+A typical agent loop: `otii_record_start`, flash firmware or send a command
+to the device, `otii_record_stop`, then `otii_plot` and
+`otii_analyze(start_s, end_s)` to zoom into whatever looks odd.
 
 ## Limits
 
@@ -34,10 +60,21 @@ running.
   efficiency-mode opt-out, a 1 ms timer and extra overlapped reads didn't
   fix it, but a busy core did, every time. The Otii app gets the same effect
   by being a busy foreground app.
+  That includes background recordings, for as long as they run, which is
+  why they stop themselves at `max_seconds`.
 - Each result reports `coverage`: samples received compared with samples due
-  for the time streamed. Below 80% the result is refused. Any missing frames
-  are timing gaps unrelated to the load, so averages stay valid, but a spike
-  inside a gap wouldn't show in max.
+  for the time streamed. Below 80% a measurement is refused; a background
+  recording returns its result with a warning. Any missing frames are timing
+  gaps unrelated to the load, so averages stay valid, but a spike inside a gap
+  wouldn't show in max.
+- Raw 50 kHz samples aren't kept. Each 1 ms frame is stored as current
+  average, minimum and maximum, plus average voltage and power. That's about
+  24 KB per second (86 MB for an hour). Overall statistics are exact over
+  every sample; windowed analysis, plots and CSV files work at 1 ms, so
+  spike heights survive but sub-millisecond timing doesn't.
+- The recording and analysis tools (`otii_record_*`, `otii_analyze`,
+  `otii_plot`, `otii_save`) and burst detection are tested against a
+  simulated Ace and synthetic traces, not yet on hardware.
 - `otii_read` is a single 25 Hz telemetry value, fine for steady loads only.
 - The current limit doesn't switch the output off. At the limit the Ace
   holds the current (just under the set value) and lets the voltage sag, like a
@@ -58,6 +95,7 @@ running.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OTII_SERIAL_PORT` | auto | COM port of the Ace. By default the Ace is found by its USB id (`0FCE:D1E6`) |
+| `OTII_CAPTURE_DIR` | `~/otii-captures` | Where `otii_save` writes files when no directory is given |
 
 ## Install
 

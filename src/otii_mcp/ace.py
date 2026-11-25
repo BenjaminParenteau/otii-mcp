@@ -29,6 +29,7 @@ from __future__ import annotations
 import struct
 import threading
 import time
+from array import array
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -191,9 +192,17 @@ class ChannelStats:
         return self.total / self.count
 
 
+_NAN = float("nan")
+
+
 @dataclass
 class Recording:
-    """Running statistics over full-rate samples; nothing is kept per sample."""
+    """Statistics over full-rate samples, plus one row per frame (1 ms) for analysis and plots.
+
+    Raw 50 kHz samples are not kept. Each frame keeps current average/min/max
+    (so spikes survive downsampling) and average voltage and power: about
+    24 KB per second, 86 MB for an hour.
+    """
 
     channels: dict[int, ChannelStats] = field(default_factory=dict)
     frames: int = 0
@@ -204,29 +213,57 @@ class Recording:
     last_arrival: float | None = None
     # Host-side streaming window: stream-start reply to stop command.
     window_s: float | None = None
+    # Per-frame rows. frame_index is the Ace's frame counter relative to the
+    # first frame, so missing frames leave gaps in time instead of shifting it.
+    frame_index: array = field(default_factory=lambda: array("I"))
+    current_avg: array = field(default_factory=lambda: array("f"))
+    current_min: array = field(default_factory=lambda: array("f"))
+    current_max: array = field(default_factory=lambda: array("f"))
+    voltage_avg: array = field(default_factory=lambda: array("f"))
+    power_avg: array = field(default_factory=lambda: array("f"))
+    _first_counter: int | None = None
     _last_counter: int | None = None
 
     def add_frame(self, payload: bytes, arrival: float | None = None) -> None:
         counter = struct.unpack_from("<I", payload, 4)[0]
         if self._last_counter is not None:
             self.dropped_frames += (counter - self._last_counter - 1) & 0xFFFFFFFF
+        else:
+            self._first_counter = counter
         self._last_counter = counter
         self.frames += 1
         if arrival is not None:
             if self.first_arrival is None:
                 self.first_arrival = arrival
             self.last_arrival = arrival
+        per_frame: dict[int, tuple[float, float, float]] = {}
         for channel, rate, values in sample_blocks(payload):
             stats = self.channels.get(channel)
             if stats is None:
                 stats = self.channels[channel] = ChannelStats(rate)
+            total, low, high = sum(values), min(values), max(values)
             stats.count += len(values)
-            stats.total += sum(values)
-            low, high = min(values), max(values)
+            stats.total += total
             if low < stats.minimum:
                 stats.minimum = low
             if high > stats.maximum:
                 stats.maximum = high
+            per_frame[channel] = (total / len(values), low, high)
+        current = per_frame.get(CHANNEL_CURRENT_A, (_NAN, _NAN, _NAN))
+        self.frame_index.append((counter - self._first_counter) & 0xFFFFFFFF)
+        self.current_avg.append(current[0])
+        self.current_min.append(current[1])
+        self.current_max.append(current[2])
+        self.voltage_avg.append(per_frame.get(CHANNEL_VOLTAGE_V, (_NAN,))[0])
+        self.power_avg.append(per_frame.get(CHANNEL_POWER_W, (_NAN,))[0])
+
+    @property
+    def frame_s(self) -> float:
+        """Duration of one frame (1 ms on the Ace: 50 samples at 50 kHz)."""
+        stats = self.channels.get(CHANNEL_CURRENT_A)
+        if stats is None or not self.frames:
+            return 0.001
+        return stats.count / self.frames / stats.sample_rate
 
     def coverage(self, channel: int) -> float:
         """Samples received on `channel` / samples the Ace should have produced while streaming.
@@ -259,6 +296,8 @@ class AceDevice:
         self._latest: Sample | None = None
         self._partial: dict[int, float] = {}
         self._recording: Recording | None = None
+        self._recording_channels: tuple[int, ...] = ()
+        self._recording_started = 0.0
         self._failure: BaseException | None = None
         self._closed = threading.Event()
         self._reader = threading.Thread(target=self._read_loop, name="ace-reader", daemon=True)
@@ -337,33 +376,66 @@ class AceDevice:
             time.sleep(0.01)
             self._raise_if_failed()
 
-    def record(self, seconds: float, channels: Iterable[int] = MAIN_CHANNELS) -> Recording:
-        """Stream full-rate samples for `seconds` and return their statistics."""
+    @property
+    def recording(self) -> Recording | None:
+        """The recording in progress, if any (its statistics update live)."""
+        return self._recording
+
+    def start_recording(self, channels: Iterable[int] = MAIN_CHANNELS) -> Recording:
+        """Start streaming full-rate samples; they accumulate until stop_recording()."""
         channels = tuple(channels)
         if not self._record_lock.acquire(blocking=False):
             raise AceError("A recording is already running.")
+        recording = Recording()
         try:
-            recording = Recording()
             for channel in channels:
                 self._command(CMD_CHANNEL, channel, 1)
             with self._state_lock:
                 self._recording = recording
-            try:
-                self._command(CMD_STREAM_START)
-                started = self._clock()
-                end = started + seconds
-                while (remaining := end - self._clock()) > 0:
-                    self._closed.wait(min(0.1, remaining))
-                    self._raise_if_failed()
-                recording.window_s = self._clock() - started
-            finally:
-                if self.alive:
+            self._command(CMD_STREAM_START)
+        except BaseException:
+            with self._state_lock:
+                self._recording = None
+            if self.alive:
+                try:
                     self._stop_stream(channels)
-                with self._state_lock:
-                    self._recording = None
-            return recording
-        finally:
+                except AceError:
+                    pass
             self._record_lock.release()
+            raise
+        self._recording_channels = channels
+        self._recording_started = self._clock()
+        return recording
+
+    def stop_recording(self) -> Recording:
+        """Stop the stream and return the finished recording.
+
+        Works after the link has dropped too: the samples received so far are kept.
+        """
+        recording = self._recording
+        if recording is None:
+            raise AceError("No recording is running.")
+        recording.window_s = self._clock() - self._recording_started
+        try:
+            if self.alive:
+                self._stop_stream(self._recording_channels)
+        finally:
+            with self._state_lock:
+                self._recording = None
+            self._record_lock.release()
+        return recording
+
+    def record(self, seconds: float, channels: Iterable[int] = MAIN_CHANNELS) -> Recording:
+        """Stream full-rate samples for `seconds` and return them."""
+        recording = self.start_recording(channels)
+        try:
+            end = self._clock() + seconds
+            while (remaining := end - self._clock()) > 0:
+                self._closed.wait(min(0.1, remaining))
+                self._raise_if_failed()
+        finally:
+            self.stop_recording()
+        return recording
 
     # -- protocol ------------------------------------------------------------
 
