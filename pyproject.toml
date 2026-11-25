@@ -1,0 +1,38 @@
+[project]
+name = "otii-mcp"
+version = "0.1.0"
+description = "Unofficial MCP server for the Otii Ace power analyzer: power on/off, current limit and 50 kHz power measurement over USB."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Benjamin Parenteau" }]
+requires-python = ">=3.11"
+keywords = ["mcp", "otii", "power", "measurement", "embedded"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = [
+    "mcp>=2.3,<3",
+    "pyserial>=3.5,<4",
+]
+
+[project.urls]
+Repository = "https://github.com/BenjaminParenteau/otii-mcp"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+otii-mcp = "otii_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
