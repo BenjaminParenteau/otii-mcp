@@ -48,6 +48,8 @@ def test_tools_over_stdio(ace_server):
 
     assert names == [
         "otii_analyze",
+        "otii_battery_estimate",
+        "otii_battery_plot",
         "otii_measure",
         "otii_plot",
         "otii_power_off",

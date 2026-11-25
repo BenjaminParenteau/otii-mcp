@@ -126,3 +126,50 @@ def render_png(
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", bbox_inches="tight")
     return buffer.getvalue()
+
+
+def render_battery_png(model: Any, result: dict[str, Any]) -> bytes:
+    """Battery voltage over the discharge: open circuit, under average and under peak load, with the cutoff."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    avg = result["load"]["avg_current_a"]
+    peak = result["load"]["peak_current_a"]
+    cutoff = result["cutoff_v"]
+    used = [i / 200 for i in range(201)]  # fraction of capacity used, 0 -> 1
+    soc = [1 - u for u in used]
+    ocv = [model.ocv(s) for s in soc]
+    under_avg = [model.ocv(s) - avg * model.resistance(s) for s in soc]
+    under_peak = [model.ocv(s) - peak * model.resistance(s) for s in soc]
+    used_pct = [u * 100 for u in used]
+
+    fig = Figure(figsize=(10, 5.5), dpi=100)
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot()
+    ax.plot(used_pct, ocv, color="#5f6368", linewidth=1.2, label="open circuit")
+    ax.plot(used_pct, under_avg, color="#1a4fb4", linewidth=1.2, label=f"under average load ({avg * 1000:.3g} mA)")
+    ax.plot(used_pct, under_peak, color="#d93025", linewidth=1.2, label=f"under peak load ({peak * 1000:.3g} mA)")
+    ax.axhline(cutoff, color="#202124", linestyle="--", linewidth=0.9, label=f"cutoff {cutoff:.3g} V ({result['cutoff_source']})")
+    usable_pct = result["usable_fraction"] * 100
+    if usable_pct < 100:
+        ax.axvspan(usable_pct, 100, color="#d93025", alpha=0.08, linewidth=0)
+        ax.axvline(usable_pct, color="#d93025", linewidth=0.8)
+        ax.annotate(
+            f"device stops at {usable_pct:.0f}% used\n({result['limited_by']})",
+            xy=(usable_pct, cutoff),
+            xytext=(max(usable_pct - 35, 2), cutoff + 0.08 * (max(ocv) - cutoff + 0.1)),
+            fontsize=8,
+            arrowprops={"arrowstyle": "->", "color": "#d93025"},
+        )
+    ax.set_xlabel("Capacity used (%)")
+    ax.set_ylabel("Battery voltage (V)")
+    ax.set_xlim(0, 100)
+    low = min(min(under_peak), cutoff)
+    ax.set_ylim(max(0.0, low - 0.1 * abs(max(ocv) - low)), max(ocv) * 1.03)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower left", fontsize=8)
+    ax.set_title(result["summary"], fontsize=9, wrap=True)
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+    return buffer.getvalue()

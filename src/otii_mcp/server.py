@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import atexit
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent, ToolAnnotations
 from pydantic import Field
 
+from otii_mcp.battery import MODELS
 from otii_mcp.bench import (
     DEFAULT_RECORD_S,
     MAX_CURRENT_LIMIT_A,
@@ -238,6 +239,141 @@ def otii_save(
     About 60 bytes per row, so an hour is roughly 200 MB.
     """
     return _run("Save", lambda bench: bench.save(directory, start_s, end_s))
+
+
+BatteryName = Annotated[
+    Literal[tuple(MODELS)],  # type: ignore[valid-type]
+    Field(description="Battery model: " + "; ".join(f"{m.name}: {m.description}" for m in MODELS.values())),
+]
+_BATTERY_PARAMS_DOC = (
+    "The battery's open-circuit voltage minus current x internal resistance must stay above the device's "
+    "minimum voltage, so the estimate checks both running out of charge and browning out under the peak "
+    "current. Currents come from the last measurement/recording (average, highest 1 ms average as the "
+    "peak, highest single sample as a worst case), or from avg_current_a/peak_current_a. Built-in models "
+    "use typical datasheet values; override capacity, resistance or the voltage curve for your cell."
+)
+
+
+def _battery_args(
+    battery: str,
+    capacity_mah: float | None,
+    cells_series: int,
+    cells_parallel: int,
+    internal_resistance_ohm: float | None,
+    ocv_curve: list[list[float]] | None,
+    device_min_voltage_v: float | None,
+    avg_current_a: float | None,
+    peak_current_a: float | None,
+    start_s: float | None,
+    end_s: float | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    model = {
+        "name": battery,
+        "capacity_mah": capacity_mah,
+        "cells_series": cells_series,
+        "cells_parallel": cells_parallel,
+        "internal_resistance_ohm": internal_resistance_ohm,
+        "ocv_curve": [tuple(point) for point in ocv_curve] if ocv_curve else None,
+    }
+    load = {
+        "device_min_voltage_v": device_min_voltage_v,
+        "avg_current_a": avg_current_a,
+        "peak_current_a": peak_current_a,
+        "start_s": start_s,
+        "end_s": end_s,
+    }
+    return model, load
+
+
+CapacityMah = Annotated[float | None, Field(gt=0, description="Capacity per cell in mAh. Omit for the model's typical value.")]
+CellsSeries = Annotated[int, Field(ge=1, le=16, description="Cells in series (voltage adds), e.g. 2 for 2xAA.")]
+CellsParallel = Annotated[int, Field(ge=1, le=16, description="Cells in parallel (capacity adds).")]
+InternalResistance = Annotated[
+    float | None,
+    Field(ge=0, description="Internal resistance per cell in ohms, constant. Omit for the model's curve."),
+]
+OcvCurve = Annotated[
+    list[list[float]] | None,
+    Field(
+        description=(
+            "Your cell's open-circuit voltage curve as [[soc, volts], ...] with soc from 0 (empty) to 1 (full). "
+            "Omit for the model's curve."
+        ),
+    ),
+]
+DeviceMinVoltage = Annotated[
+    float | None,
+    Field(gt=0, description="Lowest supply voltage the device works at (brownout). Omit for the battery's own end voltage."),
+]
+AvgCurrent = Annotated[
+    float | None,
+    Field(gt=0, description="Average current in amps, instead of using the last capture."),
+]
+PeakCurrent = Annotated[
+    float | None,
+    Field(gt=0, description="Peak (burst) current in amps; needs avg_current_a. Defaults to the average."),
+]
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Estimate battery life", readOnlyHint=True),
+    description=(
+        "Estimate how long a battery would power the measured device, how much of its capacity is usable, "
+        "and whether bursts brown it out early. Returns lifetime, the limiting factor, voltage under "
+        "average and peak load at several states of charge, and warnings (e.g. pulses above what the "
+        "cell can deliver). " + _BATTERY_PARAMS_DOC
+    ),
+)
+def otii_battery_estimate(
+    battery: BatteryName,
+    capacity_mah: CapacityMah = None,
+    cells_series: CellsSeries = 1,
+    cells_parallel: CellsParallel = 1,
+    internal_resistance_ohm: InternalResistance = None,
+    ocv_curve: OcvCurve = None,
+    device_min_voltage_v: DeviceMinVoltage = None,
+    avg_current_a: AvgCurrent = None,
+    peak_current_a: PeakCurrent = None,
+    start_s: StartS = None,
+    end_s: EndS = None,
+) -> dict[str, Any]:
+    model, load = _battery_args(
+        battery, capacity_mah, cells_series, cells_parallel, internal_resistance_ohm, ocv_curve,
+        device_min_voltage_v, avg_current_a, peak_current_a, start_s, end_s,
+    )
+    return _run("Battery estimate", lambda bench: bench.battery_estimate(model, load))
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Plot battery discharge", readOnlyHint=True),
+    description=(
+        "Plot the battery's voltage over its discharge (open circuit, under average and under peak load) "
+        "with the device's cutoff, showing where it would stop working. Same arguments as "
+        "otii_battery_estimate. " + _BATTERY_PARAMS_DOC
+    ),
+)
+def otii_battery_plot(
+    battery: BatteryName,
+    capacity_mah: CapacityMah = None,
+    cells_series: CellsSeries = 1,
+    cells_parallel: CellsParallel = 1,
+    internal_resistance_ohm: InternalResistance = None,
+    ocv_curve: OcvCurve = None,
+    device_min_voltage_v: DeviceMinVoltage = None,
+    avg_current_a: AvgCurrent = None,
+    peak_current_a: PeakCurrent = None,
+    start_s: StartS = None,
+    end_s: EndS = None,
+) -> list[TextContent | Image]:
+    model, load = _battery_args(
+        battery, capacity_mah, cells_series, cells_parallel, internal_resistance_ohm, ocv_curve,
+        device_min_voltage_v, avg_current_a, peak_current_a, start_s, end_s,
+    )
+    try:
+        caption, png = _get_bench().battery_plot(model, load)
+    except BenchError as error:
+        raise ToolError(f"Battery plot failed: {error}") from error
+    return [TextContent(type="text", text=caption), Image(data=png, format="png")]
 
 
 def main() -> None:

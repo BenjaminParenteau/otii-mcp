@@ -29,6 +29,8 @@ software running.
 | `otii_analyze(start_s?, end_s?, ...)` | Re-analyzes the last capture, or a time window of it |
 | `otii_plot(start_s?, end_s?, log_scale?)` | Returns a PNG of the last capture or a window: current band (min-max) and average, burst threshold and bursts, voltage below |
 | `otii_save(directory?, start_s?, end_s?)` | Writes CSV (1 ms rows), PNG and JSON summary. Default folder: `OTII_CAPTURE_DIR` or `~/otii-captures` |
+| `otii_battery_estimate(battery, ...)` | Battery life and brownout risk for the measured device, or for currents you give (no Ace needed then) |
+| `otii_battery_plot(battery, ...)` | PNG of battery voltage over the discharge, with the device's cutoff and where it would stop |
 
 A **report** has exact statistics over every 50 kHz sample (average, minimum and
 maximum current, voltage and power, plus energy, charge and coverage), an
@@ -48,6 +50,44 @@ less than 2 ms apart are merged.
 A typical agent loop: `otii_record_start`, flash firmware or send a command
 to the device, `otii_record_stop`, then `otii_plot` and
 `otii_analyze(start_s, end_s)` to zoom into whatever looks odd.
+
+### Battery life
+
+`otii_battery_estimate` answers "how long would this battery last, and does
+it brown out first?". A battery's terminal voltage is its open-circuit voltage
+minus current × internal resistance, and the device stops when that falls
+below its minimum voltage (`device_min_voltage_v`). So the estimate checks two
+things:
+
+- running out of charge at the average current
+- sagging below the cutoff under the peak current
+
+The second one is where coin cells and Li-SOCl2 cells usually fail with
+radios.
+
+By default the currents come from the last capture or a window of it: the
+average, the highest 1 ms average as the peak, and the highest single sample
+as a worst case. You can also pass `avg_current_a` and `peak_current_a` to
+estimate a design before you have hardware.
+
+The result includes:
+
+- lifetime, accounting for self-discharge
+- the usable share of capacity and what limits it
+- voltage under average and peak load at several states of charge
+- warnings, such as pulses above the cell's rating or a capture too short to
+  be representative
+
+Built-in models: `cr2032`, `alkaline-aa`, `alkaline-aaa`, `li-ion-18650`,
+`lipo`, `lifepo4`, `li-socl2-aa`. They use typical low-drain datasheet values;
+real cells vary with brand, temperature, age and load pattern. Combine cells
+with `cells_series` and `cells_parallel`. Override `capacity_mah`,
+`internal_resistance_ohm` or the whole `ocv_curve` (`[[soc, volts], ...]`)
+with your cell's datasheet figures when it matters.
+
+This is a calculation, not battery emulation or profiling. The Ace doesn't
+imitate a battery, and real batteries aren't measured: discharging one needs
+the Ace's current-sink mode, which isn't supported here.
 
 ## Limits
 

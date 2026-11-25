@@ -430,6 +430,72 @@ class OtiiBench:
             "summary": f"Saved {window.rows} rows ({frame_s * 1000:g} ms each) to {csv_path}, plus .png and .json",
         }
 
+    # -- battery life ------------------------------------------------------------------
+
+    def battery_estimate(self, battery: dict[str, Any], load: dict[str, Any]) -> dict[str, Any]:
+        """Battery life and brownout risk. `battery` holds build_model() arguments, `load` the current source."""
+        model, result = self._battery(battery, load)
+        return result
+
+    def battery_plot(self, battery: dict[str, Any], load: dict[str, Any]) -> tuple[str, bytes]:
+        from otii_mcp import plot
+
+        model, result = self._battery(battery, load)
+        return result["summary"], plot.render_battery_png(model, result)
+
+    def _battery(self, battery: dict[str, Any], load: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        from otii_mcp import battery as batteries
+
+        try:
+            model = batteries.build_model(**battery)
+        except batteries.BatteryError as error:
+            raise BenchError(str(error)) from error
+        avg = load.get("avg_current_a")
+        peak = load.get("peak_current_a")
+        worst = None
+        notes: list[str] = []
+        if avg is not None:
+            source: dict[str, Any] = {"kind": "given"}
+            peak = peak if peak is not None else avg
+        else:
+            if peak is not None:
+                raise BenchError("Give avg_current_a together with peak_current_a, or neither to use the last capture.")
+            capture = self._require_capture()
+            recording = capture.recording
+            try:
+                window = analysis.select(recording, load.get("start_s"), load.get("end_s"))
+                stats = analysis.summarize(recording, window)
+            except analysis.AnalysisError as error:
+                raise BenchError(str(error)) from error
+            avg = stats["current_a"]["avg"]
+            lo, hi = window.first, window.stop
+            peak = max(recording.current_avg[lo:hi])  # highest 1 ms average
+            worst = max(recording.current_max[lo:hi])  # highest single sample
+            source = {
+                "kind": capture.kind,
+                "started_at": capture.started_at.isoformat(timespec="seconds"),
+                "start_s": window.start_s,
+                "end_s": window.end_s,
+                "coverage": stats["coverage"],
+                "peak_is": "highest 1 ms average; worst_case uses the highest single sample",
+            }
+            if window.duration_s < 10:
+                notes.append(
+                    f"The capture is only {window.duration_s:.3g} s long. The estimate assumes it shows the "
+                    "device's typical behaviour; record at least one full cycle (sleep, wake, transmit)."
+                )
+        try:
+            result = batteries.estimate(
+                model, avg, peak, worst_peak_a=worst, device_min_voltage_v=load.get("device_min_voltage_v")
+            )
+        except batteries.BatteryError as error:
+            raise BenchError(str(error)) from error
+        result["load"]["source"] = source
+        if notes:
+            result["warnings"] = notes + result["warnings"]
+            result["summary"] = batteries.summary_text(result)
+        return model, result
+
     # -- internals ------------------------------------------------------------------
 
     def _finish_active(self, *, auto: bool) -> Capture | None:
